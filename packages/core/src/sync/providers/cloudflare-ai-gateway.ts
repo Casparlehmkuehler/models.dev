@@ -91,7 +91,6 @@ export const cloudflareAiGateway = {
   id: "cloudflare-ai-gateway",
   name: "Cloudflare AI Gateway",
   modelsDir: "providers/cloudflare-ai-gateway/models",
-  preserveBaseModels: false,
   preserveDescriptions: false,
   authoritativeHeaders: true,
   async fetchModels() {

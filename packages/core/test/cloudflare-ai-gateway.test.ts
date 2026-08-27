@@ -214,11 +214,7 @@ test("retries transient Cloudflare responses", async () => {
   }
 });
 
-test("Cloudflare base-model mappings are authoritative", () => {
-  expect(cloudflareAiGateway.preserveBaseModels).toBe(false);
-});
-
-test("replaces a stale base-model mapping when preservation is disabled", async () => {
+test("replaces a stale generated base-model mapping", async () => {
   const providersDir = path.join(import.meta.dirname, "..", "..", "..", "providers");
   const providerDir = await mkdtemp(path.join(providersDir, ".base-model-sync-"));
   const modelsDir = path.join(providerDir, "models");
@@ -231,7 +227,6 @@ test("replaces a stale base-model mapping when preservation is disabled", async 
       id: "base-model-test",
       name: "Base-model test",
       modelsDir,
-      preserveBaseModels: false,
       async fetchModels() {
         return [{ id: "model" }];
       },

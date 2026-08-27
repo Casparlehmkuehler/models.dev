@@ -24,7 +24,7 @@ The sync also accepts `CLOUDFLARE_PRODUCTION_API_TOKEN` and
 It reads two live Cloudflare sources plus one local curation file:
 
 - **Proxied catalog** — `GET /accounts/{id}/ai/catalog/models`. The source of truth: one
-  canonical (dotted) `model_id` per model, description, context/output limits, and pricing.
+  canonical (dotted) `model_id` per model, description, context limits, and pricing.
   This is why ids look like `anthropic/claude-haiku-4.5`, not `claude-haiku-4-5`.
 - **Per-model catalog schema** — `GET /accounts/{id}/ai/catalog/models/{id}/schema`. Used to
   derive `reasoning_options` for providers whose schema is OpenAI-compatible (xAI, Alibaba,

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { syncProvider } from "../src/sync/index.js";
@@ -96,8 +96,8 @@ test("fails closed when Cloudflare pagination is incomplete", async () => {
   process.env.CLOUDFLARE_API_TOKEN = "test";
   process.env.CLOUDFLARE_ACCOUNT_ID = "test";
   let page = 0;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    result: page++ === 0
+  globalThis.fetch = async () => new Response(JSON.stringify(catalogPage(
+    page++ === 0
       ? [{
         model_id: "openai/gpt-4.1",
         task: "Text Generation",
@@ -108,8 +108,8 @@ test("fails closed when Cloudflare pagination is incomplete", async () => {
         },
       }]
       : [],
-    result_info: { total_count: 2 },
-  }));
+    { page, total_count: 2 },
+  )));
 
   try {
     await expect(cloudflareAiGateway.fetchModels()).rejects.toThrow("pagination ended at 1/2");
@@ -126,8 +126,7 @@ test("rejects unsafe catalog model paths", async () => {
   const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
   process.env.CLOUDFLARE_API_TOKEN = "test";
   process.env.CLOUDFLARE_ACCOUNT_ID = "test";
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    result: [{
+  globalThis.fetch = async () => new Response(JSON.stringify(catalogPage([{
       model_id: "../providers/openai/models/gpt-4.1",
       task: "Text Generation",
       context_length: 1_047_576,
@@ -135,9 +134,7 @@ test("rejects unsafe catalog model paths", async () => {
         "Input tokens (per 1M)": 2,
         "Output tokens (per 1M)": 8,
       },
-    }],
-    result_info: { total_count: 1 },
-  }));
+    }])));
 
   try {
     await expect(cloudflareAiGateway.fetchModels()).rejects.toThrow("safe relative provider/model path");
@@ -145,6 +142,110 @@ test("rejects unsafe catalog model paths", async () => {
     globalThis.fetch = originalFetch;
     restoreEnv("CLOUDFLARE_API_TOKEN", originalToken);
     restoreEnv("CLOUDFLARE_ACCOUNT_ID", originalAccount);
+  }
+});
+
+test("rejects a catalog with no eligible proxied models", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.CLOUDFLARE_API_TOKEN;
+  const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  process.env.CLOUDFLARE_API_TOKEN = "test";
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test";
+  globalThis.fetch = async () => new Response(JSON.stringify(catalogPage([{
+    model_id: "@cf/meta/llama-3.1-8b-instruct",
+    task: "Text Generation",
+  }])));
+
+  try {
+    await expect(cloudflareAiGateway.fetchModels()).rejects.toThrow("no eligible proxied models");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("CLOUDFLARE_API_TOKEN", originalToken);
+    restoreEnv("CLOUDFLARE_ACCOUNT_ID", originalAccount);
+  }
+});
+
+test("validates Cloudflare page metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.CLOUDFLARE_API_TOKEN;
+  const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  process.env.CLOUDFLARE_API_TOKEN = "test";
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test";
+  globalThis.fetch = async () => new Response(JSON.stringify(catalogPage([], { page: 2, total_count: 0 })));
+
+  try {
+    await expect(cloudflareAiGateway.fetchModels()).rejects.toThrow("expected page 1, got 2");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("CLOUDFLARE_API_TOKEN", originalToken);
+    restoreEnv("CLOUDFLARE_ACCOUNT_ID", originalAccount);
+  }
+});
+
+test("retries transient Cloudflare responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalToken = process.env.CLOUDFLARE_API_TOKEN;
+  const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  process.env.CLOUDFLARE_API_TOKEN = "test";
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test";
+  let catalogRequests = 0;
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/schema")) return new Response(null, { status: 404 });
+    catalogRequests++;
+    if (catalogRequests === 1) return new Response(null, { status: 503, headers: { "retry-after": "0" } });
+    return new Response(JSON.stringify(catalogPage([{
+      model_id: "openai/gpt-4.1",
+      task: "Text Generation",
+      context_length: 1_047_576,
+      pricing: {
+        "Input tokens (per 1M)": 2,
+        "Output tokens (per 1M)": 8,
+      },
+    }])));
+  };
+
+  try {
+    expect(await cloudflareAiGateway.fetchModels()).toHaveLength(1);
+    expect(catalogRequests).toBe(2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("CLOUDFLARE_API_TOKEN", originalToken);
+    restoreEnv("CLOUDFLARE_ACCOUNT_ID", originalAccount);
+  }
+});
+
+test("Cloudflare base-model mappings are authoritative", () => {
+  expect(cloudflareAiGateway.preserveBaseModels).toBe(false);
+});
+
+test("replaces a stale base-model mapping when preservation is disabled", async () => {
+  const providersDir = path.join(import.meta.dirname, "..", "..", "..", "providers");
+  const providerDir = await mkdtemp(path.join(providersDir, ".base-model-sync-"));
+  const modelsDir = path.join(providerDir, "models");
+  await mkdir(modelsDir);
+  const file = path.join(modelsDir, "model.toml");
+  await writeFile(file, 'base_model = "anthropic/claude-opus-4-6"\n');
+
+  try {
+    const provider = {
+      id: "base-model-test",
+      name: "Base-model test",
+      modelsDir,
+      preserveBaseModels: false,
+      async fetchModels() {
+        return [{ id: "model" }];
+      },
+      parseModels(raw: unknown) {
+        return raw as Array<{ id: string }>;
+      },
+      translateModel(model: { id: string }) {
+        return { id: model.id, model: { base_model: "openai/gpt-4.1" } };
+      },
+    };
+    await syncProvider(provider);
+    expect(await readFile(file, "utf8")).toContain('base_model = "openai/gpt-4.1"');
+  } finally {
+    await rm(providerDir, { recursive: true, force: true });
   }
 });
 
@@ -185,6 +286,151 @@ test("reconciles authoritative generated headers", async () => {
     await rm(providerDir, { recursive: true, force: true });
   }
 });
+
+test("refuses to write through a symlinked model directory", async () => {
+  const providersDir = path.join(import.meta.dirname, "..", "..", "..", "providers");
+  const providerDir = await mkdtemp(path.join(providersDir, ".sync-symlink-"));
+  const outsideDir = await mkdtemp(path.join(providersDir, ".sync-outside-"));
+  const modelsDir = path.join(providerDir, "models");
+  await mkdir(modelsDir);
+  await symlink(outsideDir, path.join(modelsDir, "linked"));
+
+  try {
+    const provider = {
+      id: "symlink-test",
+      name: "Symlink test",
+      modelsDir,
+      async fetchModels() {
+        return [{ id: "linked/model" }];
+      },
+      parseModels(raw: unknown) {
+        return raw as Array<{ id: string }>;
+      },
+      translateModel(model: { id: string }) {
+        return { id: model.id, model: { base_model: "openai/gpt-4.1" } };
+      },
+    };
+    await expect(syncProvider(provider)).rejects.toThrow("Refusing to sync through symlink");
+    expect(await Bun.file(path.join(outsideDir, "model.toml")).exists()).toBe(false);
+  } finally {
+    await rm(providerDir, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("refuses a symlinked models root", async () => {
+  const providersDir = path.join(import.meta.dirname, "..", "..", "..", "providers");
+  const providerDir = await mkdtemp(path.join(providersDir, ".sync-root-"));
+  const outsideDir = await mkdtemp(path.join(providersDir, ".sync-root-outside-"));
+  const modelsDir = path.join(providerDir, "models");
+  await symlink(outsideDir, modelsDir);
+
+  try {
+    const provider = testSyncProvider(modelsDir, "model");
+    await expect(syncProvider(provider)).rejects.toThrow("Refusing to sync through symlink");
+    expect(await Bun.file(path.join(outsideDir, "model.toml")).exists()).toBe(false);
+  } finally {
+    await rm(providerDir, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("refuses a symlinked metadata file", async () => {
+  const providersDir = path.join(import.meta.dirname, "..", "..", "..", "providers");
+  const providerDir = await mkdtemp(path.join(providersDir, ".sync-metadata-"));
+  const outsideDir = await mkdtemp(path.join(providersDir, ".sync-metadata-outside-"));
+  const modelsDir = path.join(providerDir, "models");
+  const namespace = `sync-symlink-${path.basename(providerDir).replaceAll(/[^a-z0-9-]/g, "")}`;
+  const metadataDir = path.join(providersDir, "..", "models", namespace);
+  const outsideFile = path.join(outsideDir, "model.toml");
+  await mkdir(modelsDir);
+  await mkdir(metadataDir);
+  await writeFile(outsideFile, "sentinel\n");
+  await symlink(outsideFile, path.join(metadataDir, "model.toml"));
+
+  try {
+    const provider = {
+      ...testSyncProvider(modelsDir, "provider-model"),
+      metadataNamespace: namespace,
+      translateModel(model: { id: string }) {
+        return {
+          id: model.id,
+          model: {
+            name: "Provider symlink test",
+            description: "Provider model used to test safe sync paths",
+            release_date: "2026-01-01",
+            last_updated: "2026-01-01",
+            attachment: false,
+            reasoning: false,
+            tool_call: false,
+            open_weights: false,
+            modalities: { input: ["text"], output: ["text"] },
+            limit: { context: 1_000, output: 100 },
+            cost: { input: 1, output: 2 },
+          },
+          metadata: {
+            id: `${namespace}/model`,
+            model: {
+              name: "Symlink test",
+              description: "Metadata used to test safe sync paths",
+              release_date: "2026-01-01",
+              last_updated: "2026-01-01",
+              attachment: false,
+              reasoning: false,
+              tool_call: false,
+              open_weights: false,
+              modalities: { input: ["text"], output: ["text"] },
+              limit: { context: 1_000, output: 100 },
+            },
+          },
+        };
+      },
+    };
+    await expect(syncProvider(provider)).rejects.toThrow("Refusing to sync through symlink");
+    expect(await readFile(outsideFile, "utf8")).toBe("sentinel\n");
+  } finally {
+    await rm(providerDir, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
+    await rm(metadataDir, { recursive: true, force: true });
+  }
+});
+
+function testSyncProvider(modelsDir: string, id: string) {
+  return {
+    id: "symlink-test",
+    name: "Symlink test",
+    modelsDir,
+    async fetchModels() {
+      return [{ id }];
+    },
+    parseModels(raw: unknown) {
+      return raw as Array<{ id: string }>;
+    },
+    translateModel(model: { id: string }) {
+      return { id: model.id, model: { base_model: "openai/gpt-4.1" } };
+    },
+  };
+}
+
+function catalogPage(
+  result: Array<Record<string, unknown>>,
+  resultInfo: Partial<{ page: number; per_page: number; total_count: number; total_pages: number }> = {},
+) {
+  const page = resultInfo.page ?? 1;
+  const perPage = resultInfo.per_page ?? 50;
+  const totalCount = resultInfo.total_count ?? result.length;
+  return {
+    success: true,
+    result,
+    result_info: {
+      page,
+      per_page: perPage,
+      count: result.length,
+      total_count: totalCount,
+      total_pages: resultInfo.total_pages ?? Math.max(1, Math.ceil(totalCount / perPage)),
+    },
+  };
+}
 
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];

@@ -200,7 +200,7 @@ Cloudflare Workers AI is implemented in `packages/core/src/sync/providers/cloudf
 
 - Cloudflare AI Gateway is implemented in `packages/core/src/sync/providers/cloudflare-ai-gateway.ts`.
 - Source endpoints: `GET /accounts/{id}/ai/catalog/models` for model availability, context limits, and pricing, plus `GET /accounts/{id}/ai/catalog/models/{model}/schema` for reasoning controls exposed by compatible schemas.
-- Required auth: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, or the production-token aliases documented in the provider README. The hourly workflow uses the dedicated AI Gateway sandbox account credentials.
+- Required auth: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, or the production-token aliases documented in the provider README for local runs. The hourly workflow uses the canonical secret names.
 - The sync manages proxied third-party text-generation models only. Workers AI `@cf/...` models remain under `providers/cloudflare-workers-ai`.
 - `providers/cloudflare-ai-gateway/curation.toml` supplies base-model mappings, live-tested reasoning controls, structured-output support, limit overrides, and intentional skips that the catalog cannot express authoritatively.
 - New catalog entries without canonical lab metadata or required reasoning controls fail closed instead of generating incomplete TOMLs.

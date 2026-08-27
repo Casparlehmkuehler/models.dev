@@ -20,6 +20,9 @@ const MODELS_ROOT = path.join(import.meta.dirname, "..", "..", "..", "..", "..",
 const CURATION_PATH = path.join(PROVIDER_DIR, "curation.toml");
 const TEXT_GENERATION = "Text Generation";
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_CATALOG_PAGES = 1_000;
+const MAX_BACKOFF_DELAY_MS = 8_000;
+const MAX_RETRY_DELAY_MS = 60_000;
 
 const NATIVE_NPM: Record<string, string> = {
   anthropic: "@ai-sdk/anthropic",
@@ -39,9 +42,14 @@ const CatalogModel = CatalogEntry.extend({
 });
 
 const CloudflareResponse = z.object({
+  success: z.literal(true),
   result: z.array(CatalogEntry),
   result_info: z.object({
+    page: z.number().int().positive(),
+    per_page: z.number().int().positive(),
     total_count: z.number().int().nonnegative(),
+    total_pages: z.number().int().positive().optional(),
+    count: z.number().int().nonnegative().optional(),
   }).passthrough(),
 }).passthrough();
 
@@ -51,7 +59,7 @@ const SourceModel = z.object({
 });
 
 const CuratedModel = z.object({
-  base_model: z.string().min(1).optional(),
+  base_model: z.string().refine(isSafeModelID, "base_model must be a safe relative provider/model path").optional(),
   structured_output: z.boolean().optional(),
   reasoning_options: z.array(ReasoningOption).optional(),
   limit: z.object({
@@ -63,7 +71,7 @@ const CuratedModel = z.object({
     z.literal(true),
     z.object({ field: z.enum(["reasoning_content", "reasoning_details"]) }).strict(),
   ]).optional(),
-  note: z.array(z.string()).optional(),
+  note: z.array(z.string().refine((value) => !/[\r\n]/.test(value))).optional(),
 }).strict();
 
 const Curation = z.object({
@@ -83,6 +91,7 @@ export const cloudflareAiGateway = {
   id: "cloudflare-ai-gateway",
   name: "Cloudflare AI Gateway",
   modelsDir: "providers/cloudflare-ai-gateway/models",
+  preserveBaseModels: false,
   preserveDescriptions: false,
   authoritativeHeaders: true,
   async fetchModels() {
@@ -91,14 +100,17 @@ export const cloudflareAiGateway = {
     if (catalogIDs.size !== catalog.length) {
       throw new Error("Cloudflare AI Gateway catalog returned duplicate model IDs");
     }
-    const textModels = catalog
-      .filter((model) => model.task === TEXT_GENERATION)
-      .map((model) => CatalogModel.parse(model));
+    const textModels = catalog.filter((model) => model.task === TEXT_GENERATION);
     if (textModels.length === 0) {
       throw new Error("Cloudflare AI Gateway catalog returned no Text Generation models");
     }
 
-    const emittedModels = textModels.filter((model) => !skippedModels.has(model.model_id));
+    const emittedModels = textModels.filter(
+      (model) => !model.model_id.startsWith("@cf/") && !skippedModels.has(model.model_id),
+    ).map((model) => CatalogModel.parse(model));
+    if (emittedModels.length === 0) {
+      throw new Error("Cloudflare AI Gateway catalog returned no eligible proxied models");
+    }
     const sources = await mapLimit(emittedModels, 6, async (model) => ({
       catalog: model,
       schemaInput: await loadCatalogSchemaInput(model.model_id),
@@ -238,26 +250,20 @@ async function loadCatalog() {
   if (fixtureDir !== undefined) return loadFixtureRows(fixtureDir, "catalog");
 
   const { accountID, token } = credentials();
-  const models: CatalogEntry[] = [];
-  let expectedTotal: number | undefined;
-  for (let page = 1; page <= 1_000; page++) {
+  const pages: Array<z.infer<typeof CloudflareResponse>> = [];
+  for (let page = 1; page <= MAX_CATALOG_PAGES; page++) {
     const url = new URL(`${API_BASE}/${accountID}/ai/catalog/models`);
     url.searchParams.set("page", String(page));
     url.searchParams.set("per_page", "50");
-    const response = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
+    const { response, json } = await fetchJsonWithRetry(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) {
       throw new Error(`Cloudflare AI Gateway catalog request failed: ${response.status} ${response.statusText}`);
     }
-    const body = CloudflareResponse.parse(await response.json());
-    expectedTotal ??= body.result_info.total_count;
-    if (body.result_info.total_count !== expectedTotal) {
-      throw new Error("Cloudflare AI Gateway catalog total changed during pagination");
-    }
-    models.push(...body.result);
-    if (models.length === expectedTotal) return models;
-    if (body.result.length === 0 || models.length > expectedTotal) {
-      throw new Error(`Cloudflare AI Gateway catalog pagination ended at ${models.length}/${expectedTotal}`);
-    }
+    const body = CloudflareResponse.parse(json);
+    pages.push(body);
+    const expectedPages = catalogPageCount(pages[0]!);
+    if (expectedPages > MAX_CATALOG_PAGES) throw new Error(`Invalid Cloudflare AI Gateway catalog page count: ${expectedPages}`);
+    if (page === expectedPages) return validateCatalogPages(pages, "Cloudflare AI Gateway catalog");
   }
   throw new Error("Cloudflare AI Gateway catalog exceeded the pagination safety limit");
 }
@@ -268,19 +274,24 @@ async function loadCatalogSchemaInput(id: string): Promise<unknown> {
     const file = path.join(fixtureDir, "schema", `${id.replaceAll("/", "_")}.json`);
     if (!existsSync(file)) return undefined;
     return z.object({
+      success: z.literal(true),
       result: z.object({ schema: z.object({ input: z.unknown().optional() }).passthrough() }).passthrough(),
     }).passthrough().parse(JSON.parse(readFileSync(file, "utf8"))).result.schema.input;
   }
 
   const { accountID, token } = credentials();
-  const response = await fetchWithRetry(
+  const { response, json } = await fetchJsonWithRetry(
     `${API_BASE}/${accountID}/ai/catalog/models/${id.split("/").map(encodeURIComponent).join("/")}/schema`,
     { headers: { Authorization: `Bearer ${token}` } },
   );
-  if (!response.ok) return undefined;
+  if (response.status === 404) return undefined;
+  if (!response.ok) {
+    throw new Error(`Cloudflare AI Gateway schema request failed for ${id}: ${response.status} ${response.statusText}`);
+  }
   return z.object({
+    success: z.literal(true),
     result: z.object({ schema: z.object({ input: z.unknown().optional() }).passthrough() }).passthrough(),
-  }).passthrough().parse(await response.json()).result.schema.input;
+  }).passthrough().parse(json).result.schema.input;
 }
 
 function credentials() {
@@ -297,34 +308,122 @@ function credentials() {
 }
 
 function loadFixtureRows(directory: string, prefix: string): unknown[] {
-  const rows = new Map<string, unknown>();
-  let expectedTotal: number | undefined;
-  for (const file of readdirSync(directory).filter((name) => name.startsWith(prefix) && name.endsWith(".json"))) {
-    const response = CloudflareResponse.parse(JSON.parse(readFileSync(path.join(directory, file), "utf8")));
-    expectedTotal ??= response.result_info.total_count;
-    if (response.result_info.total_count !== expectedTotal) {
-      throw new Error("Cloudflare AI Gateway fixtures have inconsistent catalog totals");
-    }
-    for (const model of response.result) rows.set(model.model_id, model);
-  }
-  if (rows.size !== expectedTotal) {
-    throw new Error(`Cloudflare AI Gateway fixtures contain ${rows.size}/${expectedTotal ?? 0} catalog models`);
-  }
-  return [...rows.values()];
+  const pages = readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    .sort()
+    .map((file) => CloudflareResponse.parse(JSON.parse(readFileSync(path.join(directory, file), "utf8"))))
+    .sort((a, b) => a.result_info.page - b.result_info.page);
+  return validateCatalogPages(pages, `Cloudflare AI Gateway fixtures in ${directory}`);
 }
 
-async function fetchWithRetry(url: string | URL, init: RequestInit, attempts = 5): Promise<Response> {
-  let delay = 500;
-  for (let attempt = 1; ; attempt++) {
-    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-    if (response.ok || (response.status !== 429 && response.status < 500) || attempt >= attempts) {
-      return response;
-    }
-    const retryAfter = Number(response.headers.get("retry-after"));
-    const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : delay;
-    await Bun.sleep(Math.min(wait, 8_000));
-    delay = Math.min(delay * 2, 8_000);
+function catalogPageCount(page: z.infer<typeof CloudflareResponse>) {
+  const calculated = Math.max(1, Math.ceil(page.result_info.total_count / page.result_info.per_page));
+  if (page.result_info.total_pages !== undefined && page.result_info.total_pages !== calculated) {
+    throw new Error("Invalid Cloudflare AI Gateway catalog pagination: total_pages does not match total_count");
   }
+  return page.result_info.total_pages ?? calculated;
+}
+
+function validateCatalogPages(pages: Array<z.infer<typeof CloudflareResponse>>, source: string) {
+  const first = pages[0];
+  if (first === undefined) throw new Error(`${source} contained no pages`);
+  const expectedPages = catalogPageCount(first);
+  if (pages.length !== expectedPages) {
+    throw new Error(`${source} contains ${pages.length}/${expectedPages} pages`);
+  }
+
+  const models: CatalogEntry[] = [];
+  const ids = new Set<string>();
+  for (const [index, page] of pages.entries()) {
+    if (page.result_info.page !== index + 1) {
+      throw new Error(`${source} expected page ${index + 1}, got ${page.result_info.page}`);
+    }
+    if (
+      page.result_info.total_count !== first.result_info.total_count
+      || page.result_info.per_page !== first.result_info.per_page
+      || catalogPageCount(page) !== expectedPages
+    ) {
+      throw new Error(`${source} pagination changed while reading pages`);
+    }
+    if (page.result_info.count !== undefined && page.result_info.count !== page.result.length) {
+      throw new Error(`${source} result count mismatch on page ${page.result_info.page}`);
+    }
+    if (page.result.length > page.result_info.per_page) {
+      throw new Error(`${source} page ${page.result_info.page} exceeds per_page`);
+    }
+    for (const model of page.result) {
+      if (ids.has(model.model_id)) throw new Error(`${source} returned duplicate model ID ${model.model_id}`);
+      ids.add(model.model_id);
+      models.push(model);
+    }
+  }
+  if (models.length !== first.result_info.total_count) {
+    throw new Error(`${source} pagination ended at ${models.length}/${first.result_info.total_count}`);
+  }
+  return models;
+}
+
+async function fetchJsonWithRetry(
+  url: string | URL,
+  init: RequestInit,
+  attempts = 5,
+): Promise<{ response: Response; json?: unknown }> {
+  let delay = 500;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      const response = await fetch(url, {
+        ...init,
+        signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
+      });
+      if (!response.ok) {
+        if ((response.status === 429 || response.status >= 500) && attempt < attempts) {
+          await response.body?.cancel();
+          await waitForRetry(retryDelay(response, delay), init.signal);
+          delay = Math.min(delay * 2, MAX_BACKOFF_DELAY_MS);
+          continue;
+        }
+        await response.body?.cancel();
+        return { response };
+      }
+      try {
+        return { response, json: await response.json() };
+      } catch (error) {
+        if (attempt === attempts) throw error;
+      }
+    } catch (error) {
+      if (init.signal?.aborted || attempt === attempts) throw error;
+    }
+    await waitForRetry(delay, init.signal);
+    delay = Math.min(delay * 2, MAX_BACKOFF_DELAY_MS);
+  }
+  throw new Error("Cloudflare AI Gateway request exhausted retries");
+}
+
+function retryDelay(response: Response, fallback: number) {
+  const value = response.headers.get("retry-after");
+  if (value === null) return fallback;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, MAX_RETRY_DELAY_MS);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp)
+    ? Math.min(Math.max(timestamp - Date.now(), 0), MAX_RETRY_DELAY_MS)
+    : fallback;
+}
+
+function waitForRetry(delay: number, signal: AbortSignal | null | undefined) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delay);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, transform: (item: T) => Promise<R>) {

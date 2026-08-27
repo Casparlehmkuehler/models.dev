@@ -342,7 +342,7 @@ export async function syncProvider<SourceModel>(
 
   const metadataDir = modelMetadataDir(provider.modelsDir);
   for (const [relativePath, file] of desiredMetadata) {
-    const filePath = path.join(metadataDir, relativePath);
+    const filePath = await safeWritePath(metadataDir, relativePath);
     const currentFile = Bun.file(filePath);
     const currentText = await currentFile.exists() ? await currentFile.text() : undefined;
     const current = currentText !== undefined
@@ -373,7 +373,7 @@ export async function syncProvider<SourceModel>(
         console.log(`Skipping metadata removal in new-only mode: ${relativePath}`);
         continue;
       }
-      const filePath = path.join(metadataDir, relativePath);
+      const filePath = await safeWritePath(metadataDir, relativePath);
       files.push({ status: "deleted", path: filePath });
       if (options.dryRun) {
         console.log(`Would remove metadata ${relativePath}`);
@@ -384,7 +384,7 @@ export async function syncProvider<SourceModel>(
   }
 
   for (const [relativePath, file] of desired) {
-    const filePath = path.join(provider.modelsDir, relativePath);
+    const filePath = await safeWritePath(provider.modelsDir, relativePath, true);
     const current = existing.get(relativePath);
 
     if (current === undefined) {
@@ -442,7 +442,7 @@ export async function syncProvider<SourceModel>(
       continue;
     }
 
-    const filePath = path.join(provider.modelsDir, relativePath);
+    const filePath = await safeWritePath(provider.modelsDir, relativePath, true);
     files.push({ status: "deleted", path: filePath });
     if (options.dryRun) {
       console.log(`Would remove ${relativePath}`);
@@ -611,6 +611,31 @@ async function isSymlink(filePath: string) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     throw error;
   }
+}
+
+async function safeWritePath(root: string, relativePath: string, allowLeafSymlink = false) {
+  const resolvedRoot = path.resolve(root);
+  const target = path.resolve(resolvedRoot, relativePath);
+  const relative = path.relative(resolvedRoot, target);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to sync path outside ${root}: ${relativePath}`);
+  }
+  if (await isSymlink(resolvedRoot)) {
+    throw new Error(`Refusing to sync through symlink: ${resolvedRoot}`);
+  }
+
+  let current = resolvedRoot;
+  for (const segment of path.relative(resolvedRoot, path.dirname(target)).split(path.sep)) {
+    if (segment === "") continue;
+    current = path.join(current, segment);
+    if (await isSymlink(current)) {
+      throw new Error(`Refusing to sync through symlink: ${current}`);
+    }
+  }
+  if (!allowLeafSymlink && await isSymlink(target)) {
+    throw new Error(`Refusing to sync through symlink: ${target}`);
+  }
+  return target;
 }
 
 async function readModelMetadata(modelsDir: string) {
@@ -840,7 +865,7 @@ async function writeReport(target: string, results: SyncResult[]) {
     }
   }
 
-  lines.push("", "This PR was created automatically by the daily model sync workflow.");
+  lines.push("", "This PR was created automatically by the model sync workflow.");
   await Bun.write(".sync/model-sync-report.md", `${lines.join("\n")}\n`);
 }
 

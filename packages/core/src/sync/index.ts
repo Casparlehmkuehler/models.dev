@@ -9,6 +9,7 @@ import { ambient } from "./providers/ambient.js";
 import { anthropic } from "./providers/anthropic.js";
 import { baseten } from "./providers/baseten.js";
 import { chutes } from "./providers/chutes.js";
+import { cloudflareAiGateway } from "./providers/cloudflare-ai-gateway.js";
 import { cloudflareWorkersAi } from "./providers/cloudflare-workers-ai.js";
 import { cortecs } from "./providers/cortecs.js";
 import { crossmodel } from "./providers/crossmodel.js";
@@ -82,6 +83,8 @@ export interface SyncProvider<SourceModel> {
   preserveSymlinks?: boolean;
   preserveBaseModels?: boolean;
   preserveDescriptions?: boolean;
+  /** Replace existing leading comments with translateModel.header. */
+  authoritativeHeaders?: boolean;
   sameModel?(current: ExistingModel, desired: SyncedModel): boolean;
   missingNotice?(paths: string[]): string[];
   /**
@@ -103,9 +106,9 @@ export interface SyncProvider<SourceModel> {
     model: SyncedModel;
     metadata?: { id: string; model: SyncedMetadata };
     /**
-     * Leading comment block for the written file when it has none of its own
-     * (e.g. the wire-path header every toggle reasoning control requires). A
-     * header already present on the existing file always wins.
+     * Leading comment block for the written file (e.g. the wire-path header
+     * every toggle reasoning control requires). Existing headers win unless
+     * authoritativeHeaders is enabled.
      */
     header?: string;
   } | undefined;
@@ -128,6 +131,7 @@ export const providers: {
   anthropic: SyncProvider<any>;
   baseten: SyncProvider<any>;
   chutes: SyncProvider<any>;
+  "cloudflare-ai-gateway": SyncProvider<any>;
   "cloudflare-workers-ai": SyncProvider<any>;
   cortecs: SyncProvider<any>;
   crossmodel: SyncProvider<any>;
@@ -160,6 +164,7 @@ export const providers: {
   anthropic,
   baseten,
   chutes,
+  "cloudflare-ai-gateway": cloudflareAiGateway,
   "cloudflare-workers-ai": cloudflareWorkersAi,
   cortecs,
   crossmodel,
@@ -206,7 +211,7 @@ export const groups = {
     "openrouter",
     "vercel",
   ],
-  cloudflare: ["cloudflare-workers-ai"],
+  cloudflare: ["cloudflare-ai-gateway", "cloudflare-workers-ai"],
   direct: ["ambient", "anthropic", "baseten", "chutes", "cortecs", "deepinfra", "digitalocean", "google", "hyper", "openai", "ovhcloud", "pioneer", "tinfoil", "venice", "wandb", "xai"],
 } as const;
 
@@ -232,7 +237,11 @@ export async function syncProvider<SourceModel>(
   const { models: existing, brokenSymlinks } = existingState;
   let { modelMetadata } = existingState;
   const sourceModels = provider.parseModels(await provider.fetchModels());
-  const desired = new Map<string, { model: z.infer<typeof SyncedAuthoredModel>; content: string }>();
+  const desired = new Map<string, {
+    model: z.infer<typeof SyncedAuthoredModel>;
+    content: string;
+    header: string;
+  }>();
   const desiredMetadata = new Map<string, { model: z.infer<typeof ModelMetadata>; content: string }>();
   const skippedRemote: string[] = [];
 
@@ -315,9 +324,16 @@ export async function syncProvider<SourceModel>(
       throw parsed.error;
     }
 
+    const translatedHeader = translated.header === undefined
+      ? undefined
+      : leadingComments(translated.header);
+    const header = provider.authoritativeHeaders
+      ? translatedHeader ?? ""
+      : (existing.get(relativePath)?.header || translatedHeader) ?? "";
     desired.set(relativePath, {
       model: parsed.data,
-      content: ((existing.get(relativePath)?.header || translated.header) ?? "") + formatToml(parsed.data),
+      content: header + formatToml(parsed.data),
+      header,
     });
   }
 
@@ -388,7 +404,12 @@ export async function syncProvider<SourceModel>(
       continue;
     }
 
-    if (!(provider.sameModel?.(current.authored, file.model) ?? sameModel(relativePath, current.authored, file.model))) {
+    const headerChanged = provider.authoritativeHeaders && current.header !== file.header;
+    if (
+      headerChanged
+      || !(provider.sameModel?.(current.authored, file.model)
+        ?? sameModel(relativePath, current.authored, file.model))
+    ) {
       if (options.newOnly) {
         unchanged++;
         continue;

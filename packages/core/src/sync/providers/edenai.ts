@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import type { SyncProvider, SyncedFullModel, SyncedModel } from "../index.js";
+import type { ExistingModel, SyncProvider, SyncedFullModel, SyncedModel } from "../index.js";
 import {
   factorBaseModel,
   modelMetadata,
@@ -230,10 +230,10 @@ function regionVariantName(model: EdenAIModel, baseModel: string) {
 // Reasoning options
 // ========================================
 
-// Eden AI's only reasoning control is `reasoning_effort`, so a model is
-// published with the effort list its lab entry (or an established relay peer)
-// already documents. Peers exposing only `toggle` / `budget_tokens` have no
-// equivalent here, and those models are skipped rather than given a guess.
+// This sync currently maps only `reasoning_effort`, using the effort list the
+// lab entry (or an established relay peer) documents. Toggle / budget controls
+// need route-specific mappings. Preserve authored controls when unresolved;
+// skip new models rather than inventing an empty control set.
 function effortValues(options: unknown): string[] | "always-on" | undefined {
   if (!Array.isArray(options)) return undefined;
   if (options.length === 0) return "always-on";
@@ -425,6 +425,7 @@ function mapModalities(values: readonly string[] | null | undefined) {
 
 export function buildEdenAIModel(
   model: EdenAIModel,
+  existing?: ExistingModel,
   firstParty: ReadonlySet<string> = firstPartyBaseModels,
 ): SyncedModel | undefined {
   const baseModel = resolveEdenAIBaseModel(model);
@@ -449,7 +450,7 @@ export function buildEdenAIModel(
   // the lab entry owns it and only the effort controls are authored here.
   const reasoning = modelMetadata(baseModel).reasoning === true;
   const reasoningOptions = reasoning
-    ? reasoningOptionsFor(baseModel)
+    ? reasoningOptionsFor(baseModel) ?? existing?.reasoning_options
     : undefined;
   if (reasoning && reasoningOptions === undefined) return undefined;
 
@@ -510,8 +511,8 @@ export const edenai = {
     firstPartyBaseModels = collectFirstPartyBaseModels(models);
     return models;
   },
-  translateModel(model) {
-    const built = buildEdenAIModel(model);
+  translateModel(model, context) {
+    const built = buildEdenAIModel(model, context.existing(model.id));
     if (built === undefined) return undefined;
     return { id: model.id, model: built };
   },

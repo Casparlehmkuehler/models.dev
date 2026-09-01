@@ -1,0 +1,18 @@
+# https://api.cline.bot/api/v1/ai/cline/recommended-models (accessed 2026-09-01)
+# Model ID cline-pass/glm-5.3-flash confirmed in live ClinePass catalog (clinePass[]).
+# https://docs.cline.bot/getting-started/clinepass — docs model/pricing tables not yet updated for Flash.
+# Reference pricing from Z.AI list/promo rates used for ClinePass quota accounting peers:
+# https://docs.z.ai/guides/overview/pricing — GLM-5.3-Flash promo $0.075 / $0.25 / $0.015 per 1M
+# (input/output/cache read; 50% off list through 2026-09-09 24:00 UTC+8).
+# Effort: reasoning_effort = low|high|max (matches first-party GLM-5.3-Flash / ClinePass glm-5.3).
+# https://docs.z.ai/guides/llm/glm-5.3-flash
+base_model = "zhipuai/glm-5.3-flash"
+reasoning_options = [{ type = "effort", values = ["low", "high", "max"] }]
+
+[interleaved]
+field = "reasoning_content"
+
+[cost]
+input = 0.075
+output = 0.25
+cache_read = 0.015

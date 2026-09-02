@@ -1,8 +1,6 @@
 # Sources:
 # - https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
 # - https://ai.google.dev/gemini-api/docs/latest-model
-# - https://deepmind.google/models/model-cards/gemini-3-8-flash/
-# - https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash
 name = "Gemini 3.8 Flash"
 description = "Google's most intelligent Flash model, engineered for long-horizon software engineering, autonomous agents, and complex enterprise workflows"
 family = "gemini-flash"
@@ -10,10 +8,9 @@ release_date = "2026-09-02"
 last_updated = "2026-09-02"
 attachment = true
 reasoning = true
-temperature = false
+temperature = true
 tool_call = true
 structured_output = true
-knowledge = "2026-03"
 open_weights = false
 
 [limit]
@@ -23,50 +20,3 @@ output = 65_536
 [modalities]
 input = ["text", "image", "video", "audio", "pdf"]
 output = ["text"]
-
-[[links]]
-label = "Gemini 3.8 Flash model card"
-url = "https://deepmind.google/models/model-cards/gemini-3-8-flash/"
-type = "model_card"
-
-[[links]]
-label = "Gemini 3.8 Flash developer guide"
-url = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-type = "docs"
-
-[[links]]
-label = "Gemini 3.8 Flash specifications"
-url = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-8-flash"
-type = "docs"
-
-[[benchmarks]]
-name = "Terminal-Bench"
-score = 90.8
-version = "2.1"
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-
-[[benchmarks]]
-name = "SWE-Bench Pro"
-score = 61.6
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-
-[[benchmarks]]
-name = "SWE-Atlas"
-score = 51.9
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-
-[[benchmarks]]
-name = "CharXiv"
-score = 86.2
-variant = "Multimodal"
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-
-[[benchmarks]]
-name = "GDP.pdf"
-score = 35.0
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"
-
-[[benchmarks]]
-name = "Humanity's Last Exam"
-score = 45.4
-source = "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-8-flash"

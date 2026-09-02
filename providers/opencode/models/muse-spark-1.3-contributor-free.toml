@@ -9,7 +9,9 @@ release_date = "2026-09-02"
 last_updated = "2026-09-02"
 attachment = true
 reasoning = true
+temperature = true
 tool_call = true
+structured_output = true
 open_weights = false
 
 reasoning_options = [{ type = "effort", values = ["minimal", "low", "medium", "high", "xhigh"] }]

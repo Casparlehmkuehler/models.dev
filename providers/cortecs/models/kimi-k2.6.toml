@@ -12,8 +12,5 @@ input = 0.773
 output = 3.38
 cache_read = 0.193
 
-[limit]
-output = 256_000
-
 [modalities]
 input = ["text", "image", "pdf"]
